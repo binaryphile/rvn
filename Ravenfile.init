@@ -1,0 +1,45 @@
+# Ravenfile.init - setup Raven
+#
+# Adds rvn to the PATH and links Ravenfile to $HOME
+
+# boilerplate
+# -----------
+
+NL=$'\n'  #NL is newline
+IFS=$NL   #don't require quotes on normal string vars
+
+# HERE is this Ravenfile's directory, normalized for symlinks
+HERE=$(dirname $(readlink $BASH_SOURCE || echo $BASH_SOURCE))
+
+# init adds rvn to your path
+#
+# If ~/bin or ~/.local/bin exists, it creates a link to rvn in that directory.
+# Otherwise it updates one of your login profiles to add bin from the rvn repo
+# to your PATH.
+#
+INIT () {
+  local path profile
+
+  echo "finding local bin directory..."
+  for path in $HOME{,/.local}/bin; do
+    [[ :$PATH: == *:"$path":* && -d $path ]] && {
+      echo "found '$path'"
+      break
+    }
+  done
+
+  if [[ -d $path ]]; then
+    echo "linking rvn into '$path'..."
+    ln -sf $HERE/bin/rvn $path
+  else
+    [[ -e $HOME/.bash_profile ]] && profile=$HOME/.bash_profile || profile=$HOME/.profile
+    grep -v "PATH+=:'$HERE'/bin" $profile && {
+      echo "updating '$profile' PATH with $HERE/bin..."
+      echo "$NL" "PATH+=:'$HERE'/bin" >>$profile
+    }
+  fi
+
+  echo done
+}
+
+# vim: ft=sh

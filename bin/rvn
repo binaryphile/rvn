@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+NL=$'\n' #NL is newline
+
+IFS=$NL read -rd '' USAGE <<'END'
+Raven - run shell functions from a Ravenfile
+
+Usage: rvn [--help] [--trace] <command> [args]
+
+where [command] is any function in a Ravenfile in the current directory or
+above, up to HOME.
+
+To see the available commands, run:
+
+    rvn help
+
+For help with a specific command, run:
+
+    rvn help <command>
+
+Options:
+
+    --help    show this message
+    --trace   show bash trace debugging
+
+Raven strips itself (i.e. "rvn") from the commandline string and runs whatever
+comes after, provided that the command doesn't start with a capital.
+
+It loads any functions defined in Ravenfiles beforehand so you can call them
+from the cli using Raven.
+
+Ravenfiles may have the name "Ravenfile" with any extension or no extension
+(e.g. Ravenfile.local), and may be located in the current directory or any
+parent, up to $HOME.
+
+Multiple Ravenfiles can be overlaid, with the files closer to the current
+directory being loaded last, hence taking precedence.  Files in the same
+directory are loaded in lexical order.
+
+You provide the help text for Raven commands by writing comments above your
+function definitions, contiguous to the first line of the function definition.
+
+Functions beginning with a capital letter are considered private so you
+may define functions which aren't available from the cli.
+END
+
+# all internal functions are private and therefore capitalized
+Main () {
+  # note the existing defined functions before we start
+  functionList=$(compgen -A function)
+
+  SourceRavenfiles
+
+  # list the functions that were just sourced
+  commands=( $(comm -13 <(echo "$functionList") <(compgen -A function | grep ^[[:upper:]-]\\+$ | tr [:upper:] [:lower:])) )
+
+  # handle help
+  [[ $1 == help ]] && {
+    # general help (no command)
+    [[ -z ${2:-} ]] && {
+      echo "Available commands:$NL"
+      for command in "${commands[@]}"; do
+        normalized=${command//-/_}
+        local -n helpvar=${normalized^^}HELP
+        [[ -n ${helpvar[0]:-} ]] && echo "$command -${helpvar[0]}" || echo "$command - no help available"
+      done
+      exit
+    }
+
+    # command-specific help
+    command=$2
+    [[ "$IFS${commands[*]}$IFS" == *"$IFS$command$IFS"* ]] || {
+      echo "Error: unrecognized command '$command'"
+      exit 2
+    }
+    normalized=${command//-/_}
+    local -n helpvar=${normalized^^}HELP
+    echo "$command:$NL"
+    [[ -n ${helpvar[0]:-} ]] && printf '%s\n' "${helpvar[@]}" || echo " no help available"
+    exit
+  }
+
+  # check that the command is legit or bail
+  command=$1
+  shift
+  [[ "$IFS${commands[*]}$IFS" == *"$IFS$command$IFS"* ]] || {
+    echo "Error: unrecognized command '$command'$NL"
+    echo "Available commands:$NL"
+    for command in "${commands[@]}"; do
+      normalized=${command//-/_}
+      local -n helpvar=${normalized^^}HELP
+      [[ -n ${helpvar[0]:-} ]] && echo "$command -${helpvar[0]}" || echo "$command - no help available"
+    done
+    exit 2
+  }
+
+  # run the command and capture the result code
+  ${command^^} "$@"
+  rc=$?
+
+  # if using explicit path to run rvn, tell the user how to add to path (once)
+  [[ $command == init || -e $CONFIGDIR/already-helped ]] || $(type -p rvn >/dev/null) || PathHelp
+
+  return $rc
+}
+
+# PathHelp notes that we have helped and tells the user how to add rvn to their
+# PATH
+PathHelp () {
+  local here
+
+  mkdir -p "$CONFIGDIR"
+  touch "$CONFIGDIR"/already-helped
+
+  here=$(cd -P "$(dirname "$0")"; pwd)
+  cat >&2 <<END
+If you would like to call rvn without needing to specify an explicit path,
+either add the following to your ~/.bash_profile or other profile file:
+
+    PATH+=:\$HOME${here#$HOME}
+
+or symlink rvn into an existing PATH directory:
+
+    ln -s $here/rvn $HOME/.local/bin/rvn
+END
+}
+
+# SourceRavenfiles walks down from HOME to the working directory and sources
+# any Ravenfile or Ravenfile.* files along the way.  It also captures help for
+# the functions.
+SourceRavenfiles () {
+  local cmd comments dir function line nextdir
+
+  # tail or tac for reverse cat?
+  type -p tac &>/dev/null && cmd=tac || cmd="tail -r"
+
+  # dir walks the tree from HOME
+  dir=$HOME
+  nextdir=SLUG
+
+  # source any Ravenfile from $HOME down to here
+  shopt -s nullglob
+  while [[ -n $nextdir ]]; do
+    for file in $dir/Ravenfile $dir/Ravenfile.*; do
+      [[ -e $file ]] && {
+        source "$file"
+        comments=$(IFS=' '; $cmd "$file" | awk "$AWKSCR" | $cmd)
+        while read -r line; do
+          [[ $line == \#* ]] && eval "$(printf '%sHELP+=( %q )' "${function^^}" "${line#\#}")" || {
+            function=${line//-/_}
+            eval "$(printf '%sHELP=()' "${function^^}")"
+          }
+        done <<<"$comments"
+      }
+    done
+    nextdir=${PWD#$dir/}
+    nextdir=${nextdir%%/*}
+    dir+=/$nextdir
+  done
+  shopt -u nullglob
+}
+
+# globals
+# -------
+
+# CONFIGDIR is the user's directory for configuration settings
+CONFIGDIR=$HOME/.config/rvn
+
+# AWKSCR is an awk script to extract help from comments
+! IFS=$NL read -rd '' AWKSCR <<'END'
+  # bash function declaration
+  /^[ \t]*([A-Z0-9-]+[ \t]*\([ \t]*\)|function[ \t]+[A-Z0-9-]+)[ \t]*{/ {
+    shouldPrint = 1
+
+    if ( $1 == "function" ) {
+      name = $2
+    } else {
+      name = $1
+    }
+    next
+  }
+
+  # comment
+  /^[ \t]*#/ {
+    if ( shouldPrint ) {
+      print
+    }
+  }
+
+  # not comment, stop printing
+  /^[ \t]*[^#]/ {
+    if ( shouldPrint ) {
+      print name
+    }
+    shouldPrint = 0
+    next
+  }
+END
+
+return 2>/dev/null
+set -euo pipefail
+
+# parse options
+# -------------
+
+while [[ $1 == -?* ]]; do
+  case $1 in
+    --trace ) set -x;;
+    --help )
+      echo "$USAGE"
+      exit
+      ;;
+    -- )
+      shift
+      break
+      ;;
+    * )
+      echo "Error: unrecognized option '$1'$NL"
+      echo "$USAGE"
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+# check for remaining args
+(( $# )) || {
+  echo "Error: no command specified.$NL"
+  echo "$USAGE"
+  exit 2
+}
+
+# check that the command is public (not uppercase)
+[[ -z $1 || $1 =~ ^[^[:upper:]] ]] || {
+  echo "Raven cannot call private commands (uppercased)"
+  exit 1
+}
+
+# check that we're under $HOME
+[[ $PWD == "$HOME" || $PWD == "$HOME"/* ]] || {
+  echo "Raven only works in your home directory tree."
+  exit 1
+}
+
+Main "$@"
